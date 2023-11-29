@@ -10,6 +10,8 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Handler
 import android.util.Log
+import androidx.activity.ComponentActivity
+import androidx.activity.result.ActivityResultLauncher
 import androidx.annotation.NonNull
 import androidx.core.content.ContextCompat
 import androidx.health.connect.client.HealthConnectClient
@@ -76,6 +78,8 @@ class HealthPlugin(private var channel: MethodChannel? = null) :
     private var useHealthConnectIfAvailable: Boolean = false
     private lateinit var healthConnectClient: HealthConnectClient
     private lateinit var scope: CoroutineScope
+
+    private var healthConnectRequestPermissionsLauncher:  ActivityResultLauncher<Set<String>>? = null
 
     private var BODY_FAT_PERCENTAGE = "BODY_FAT_PERCENTAGE"
     private var HEIGHT = "HEIGHT"
@@ -442,6 +446,19 @@ class HealthPlugin(private var channel: MethodChannel? = null) :
             NUTRITION -> DataType.TYPE_NUTRITION
             else -> throw IllegalArgumentException("Unsupported dataType: $type")
         }
+    }
+
+        private  fun onHealthConnectPermissionCallback(permissionGranted: Set<String>)
+    {
+        if(permissionGranted.isEmpty()) {
+            mResult?.success(false);
+            Log.i("FLUTTER_HEALTH", "Access Denied (to Health Connect)!")
+
+        }else {
+            mResult?.success(true);
+            Log.i("FLUTTER_HEALTH", "Access Granted (to Health Connect)!")
+        }
+
     }
 
     private fun getField(type: String): Field {
@@ -1554,10 +1571,19 @@ class HealthPlugin(private var channel: MethodChannel? = null) :
         }
         binding.addActivityResultListener(this)
         activity = binding.activity
+
+                if ( healthConnectAvailable) {
+            val requestPermissionActivityContract = PermissionController.createRequestPermissionResultContract()
+
+            healthConnectRequestPermissionsLauncher =(activity as ComponentActivity).registerForActivityResult(requestPermissionActivityContract) { granted ->
+                onHealthConnectPermissionCallback(granted);
+            }
+        }
     }
 
     override fun onDetachedFromActivityForConfigChanges() {
         onDetachedFromActivity()
+        healthConnectRequestPermissionsLauncher = null;
     }
 
     override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) {
@@ -1679,9 +1705,16 @@ class HealthPlugin(private var channel: MethodChannel? = null) :
                 }
             }
         }
-        val contract = PermissionController.createRequestPermissionResultContract()
+        val contract = PermissionController.createRequestPermissionResultContractLegacy()
         val intent = contract.createIntent(activity!!, permList.toSet())
-        activity!!.startActivityForResult(intent, HEALTH_CONNECT_RESULT_CODE)
+                if(healthConnectRequestPermissionsLauncher == null) {
+            result.success(false)
+            Log.i("FLUTTER_HEALTH", "Permission launcher not found")
+            return;
+        }
+
+
+        healthConnectRequestPermissionsLauncher!!.launch(permList.toSet());
     }
 
     fun getHCData(call: MethodCall, result: Result) {
@@ -1690,82 +1723,86 @@ class HealthPlugin(private var channel: MethodChannel? = null) :
         val endTime = Instant.ofEpochMilli(call.argument<Long>("endTime")!!)
         val healthConnectData = mutableListOf<Map<String, Any?>>()
         scope.launch {
-            MapToHCType[dataType]?.let { classType ->
-                val request = ReadRecordsRequest(
-                    recordType = classType,
-                    timeRangeFilter = TimeRangeFilter.between(startTime, endTime),
-                )
-                val response = healthConnectClient.readRecords(request)
+            try {
+                MapToHCType[dataType]?.let { classType ->
+                    val request = ReadRecordsRequest(
+                        recordType = classType,
+                        timeRangeFilter = TimeRangeFilter.between(startTime, endTime),
+                    )
+                    val response = healthConnectClient.readRecords(request)
 
-                // Workout needs distance and total calories burned too
-                if (dataType == WORKOUT) {
-                    for (rec in response.records) {
-                        val record = rec as ExerciseSessionRecord
-                        val distanceRequest = healthConnectClient.readRecords(
-                            ReadRecordsRequest(
-                                recordType = DistanceRecord::class,
-                                timeRangeFilter = TimeRangeFilter.between(
-                                    record.startTime,
-                                    record.endTime,
+                    // Workout needs distance and total calories burned too
+                    if (dataType == WORKOUT) {
+                        for (rec in response.records) {
+                            val record = rec as ExerciseSessionRecord
+                            val distanceRequest = healthConnectClient.readRecords(
+                                ReadRecordsRequest(
+                                    recordType = DistanceRecord::class,
+                                    timeRangeFilter = TimeRangeFilter.between(
+                                        record.startTime,
+                                        record.endTime,
+                                    ),
                                 ),
-                            ),
-                        )
-                        var totalDistance = 0.0
-                        for (distanceRec in distanceRequest.records) {
-                            totalDistance += distanceRec.distance.inMeters
-                        }
+                            )
+                            var totalDistance = 0.0
+                            for (distanceRec in distanceRequest.records) {
+                                totalDistance += distanceRec.distance.inMeters
+                            }
 
-                        val energyBurnedRequest = healthConnectClient.readRecords(
-                            ReadRecordsRequest(
-                                recordType = TotalCaloriesBurnedRecord::class,
-                                timeRangeFilter = TimeRangeFilter.between(
-                                    record.startTime,
-                                    record.endTime,
+                            val energyBurnedRequest = healthConnectClient.readRecords(
+                                ReadRecordsRequest(
+                                    recordType = TotalCaloriesBurnedRecord::class,
+                                    timeRangeFilter = TimeRangeFilter.between(
+                                        record.startTime,
+                                        record.endTime,
+                                    ),
                                 ),
-                            ),
-                        )
-                        var totalEnergyBurned = 0.0
-                        for (energyBurnedRec in energyBurnedRequest.records) {
-                            totalEnergyBurned += energyBurnedRec.energy.inKilocalories
-                        }
+                            )
+                            var totalEnergyBurned = 0.0
+                            for (energyBurnedRec in energyBurnedRequest.records) {
+                                totalEnergyBurned += energyBurnedRec.energy.inKilocalories
+                            }
 
-                        // val metadata = (rec as Record).metadata
-                        // Add final datapoint
-                        healthConnectData.add(
-                            // mapOf(
-                            mapOf<String, Any?>(
-                                "workoutActivityType" to (
-                                        workoutTypeMapHealthConnect.filterValues { it == record.exerciseType }.keys.firstOrNull()
-                                            ?: "OTHER"
-                                        ),
-                                "totalDistance" to if (totalDistance == 0.0) null else totalDistance,
-                                "totalDistanceUnit" to "METER",
-                                "totalEnergyBurned" to if (totalEnergyBurned == 0.0) null else totalEnergyBurned,
-                                "totalEnergyBurnedUnit" to "KILOCALORIE",
-                                "unit" to "MINUTES",
-                                "date_from" to rec.startTime.toEpochMilli(),
-                                "date_to" to rec.endTime.toEpochMilli(),
-                                "source_id" to "",
-                                "source_name" to record.metadata.dataOrigin.packageName,
-                            ),
-                        )
-                    }
-                    // Filter sleep stages for requested stage
-                } else if (classType == SleepStageRecord::class) {
-                    for (rec in response.records) {
-                        if (rec is SleepStageRecord) {
-                            if (dataType == MapSleepStageToType[rec.stage]) {
-                                healthConnectData.addAll(convertRecord(rec, dataType))
+                            // val metadata = (rec as Record).metadata
+                            // Add final datapoint
+                            healthConnectData.add(
+                                // mapOf(
+                                mapOf<String, Any?>(
+                                    "workoutActivityType" to (
+                                            workoutTypeMapHealthConnect.filterValues { it == record.exerciseType }.keys.firstOrNull()
+                                                ?: "OTHER"
+                                            ),
+                                    "totalDistance" to if (totalDistance == 0.0) null else totalDistance,
+                                    "totalDistanceUnit" to "METER",
+                                    "totalEnergyBurned" to if (totalEnergyBurned == 0.0) null else totalEnergyBurned,
+                                    "totalEnergyBurnedUnit" to "KILOCALORIE",
+                                    "unit" to "MINUTES",
+                                    "date_from" to rec.startTime.toEpochMilli(),
+                                    "date_to" to rec.endTime.toEpochMilli(),
+                                    "source_id" to "",
+                                    "source_name" to record.metadata.dataOrigin.packageName,
+                                ),
+                            )
+                        }
+                        // Filter sleep stages for requested stage
+                    } else if (classType == SleepStageRecord::class) {
+                        for (rec in response.records) {
+                            if (rec is SleepStageRecord) {
+                                if (dataType == MapSleepStageToType[rec.stage]) {
+                                    healthConnectData.addAll(convertRecord(rec, dataType))
+                                }
                             }
                         }
-                    }
-                } else {
-                    for (rec in response.records) {
-                        healthConnectData.addAll(convertRecord(rec, dataType))
+                    } else {
+                        for (rec in response.records) {
+                            healthConnectData.addAll(convertRecord(rec, dataType))
+                        }
                     }
                 }
+                Handler(context!!.mainLooper).run { result.success(healthConnectData) }
+            } catch (e:Exception) {
+                Handler(context!!.mainLooper).run { result.success(healthConnectData) }
             }
-            Handler(context!!.mainLooper).run { result.success(healthConnectData) }
         }
     }
 
