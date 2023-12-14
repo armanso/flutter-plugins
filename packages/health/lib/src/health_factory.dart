@@ -459,7 +459,7 @@ class HealthFactory {
       dataPoints.addAll(result);
     }
 
-    const int threshold = 100;
+    const int threshold = 200;
     if (dataPoints.length > threshold) {
       return compute(removeDuplicates, dataPoints);
     }
@@ -506,10 +506,10 @@ class HealthFactory {
         "dataPoints": fetchedDataPoints,
         "deviceId": '$_deviceId',
       };
-      const thresHold = 100;
+      const threshold = 200;
       // If the no. of data points are larger than the threshold,
       // call the compute method to spawn an Isolate to do the parsing in a separate thread.
-      if (fetchedDataPoints.length > thresHold) {
+      if (fetchedDataPoints.length > threshold) {
         return compute(_parse, mesg);
       }
       return _parse(mesg);
